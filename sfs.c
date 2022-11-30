@@ -77,12 +77,6 @@ static int get_entry(const char *path, struct sfs_entry *ret_entry,
      * path, return it. If there are more parts remaining, recurse to handle
      * that subdirectory. */
 
-    if(strcmp(path, "/") == 0)
-        return 1;
-    
-
-    log("path before: %s", path);
-
     
     int ret = 1;    
     char *thePath = (char *) path;
@@ -94,16 +88,30 @@ static int get_entry(const char *path, struct sfs_entry *ret_entry,
     struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
     disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
 
-
     for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
-        if(strcmp(rootdir[i].filename, token) == 0){
+        if(strlen(rootdir[i].filename) > 0 && strcmp(rootdir[i].filename, token) == 0){
             log("found entry: %s", rootdir[i].filename);
+            
+            log("remaining path: %s or %s?\n", thePath, path);  
+            // if(rootdir[i].size & SFS_DIRECTORY){
+
+            //     blockidx_t blockID = rootdir[i].first_block;
+            //     disk_read(ret_entry, 512, SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE);
+
+            //     blockidx_t *buffer = malloc(2);
+            //     disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
+            //     blockID = *buffer;
+                
+            //     disk_read(ret_entry+512, 512, SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE);
+
+            // }
+            // else {
+                disk_read(ret_entry, sizeof(struct sfs_entry), SFS_ROOTDIR_OFF + i * sizeof(struct sfs_entry));
+            // }   
+
             ret = 0;
-            disk_read(ret_entry, sizeof(struct sfs_entry), SFS_ROOTDIR_OFF + i * sizeof(struct sfs_entry));
         }
     }
-
-    log("path after: %s", path);
 
     return ret;
 }
@@ -123,7 +131,7 @@ static int get_entry(const char *path, struct sfs_entry *ret_entry,
 static int sfs_getattr(const char *path,
                        struct stat *st)
 {
-    int res = 0;
+    int res = -ENOSYS;
 
     log("getattr %s\n", path);
 
@@ -138,25 +146,28 @@ static int sfs_getattr(const char *path,
     if (strcmp(path, "/") == 0) {
         st->st_mode = S_IFDIR | 0755;
         st->st_nlink = 2;
+        res = 0;
     } else {
-        struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
-        disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
         
-        res = -ENOENT;
-        for(unsigned int i=0; i<SFS_ROOTDIR_NENTRIES; i++){
-            if(strlen(rootdir[i].filename) != 0 && strcmp(rootdir[i].filename, &path[1]) == 0){
-                res = 0;
-                if(rootdir[i].size & SFS_DIRECTORY){
-                    st->st_mode = S_IFDIR | 0755;
-                    st->st_nlink = 2;
-                }
-                else {
-                    st->st_mode = S_IFREG | 0755;
-                    st->st_nlink = 1;
-                    st->st_size = rootdir[i].size & SFS_SIZEMASK;
-                }   
-            }
+        struct sfs_entry *entry = malloc(64);
+        unsigned *entry_off;
+
+        if(get_entry(path, entry, entry_off) > 0 ){
+            return -ENOENT;
         }
+
+        res = 0;
+
+        if(entry->size & SFS_DIRECTORY){
+            st->st_mode = S_IFDIR | 0755;
+            st->st_nlink = 2;
+        }
+        else {
+            st->st_mode = S_IFREG | 0755;
+            st->st_nlink = 1;
+            st->st_size = entry->size & SFS_SIZEMASK;
+        }   
+        
     }
 
     return res;
@@ -183,17 +194,32 @@ static int sfs_readdir(const char *path,
     (void)filler; /* Placeholder - use me */
     (void)buf; /* Placeholder - use me */
 
-    if(strcmp(path, "/"))
-        return -ENOSYS;
+    //if(strcmp(path, "/") == 0){
 
-    struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
-    disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
+        struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
+        disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
 
-    for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
-        if(strlen(rootdir[i].filename) > 0){
-            filler(buf, rootdir[i].filename, NULL, 0);
+        log("readdir rootpath");
+
+        for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
+
+            if(strlen(rootdir[i].filename) > 0){
+                filler(buf, rootdir[i].filename, NULL, 0);
+            }
         }
-    }
+    //}
+    //else {
+        //TODO: IMPLEMENT READDIR ON MULTIPLE LEVELS
+        // log("readdir not root path");
+
+        // struct sfs_entry *subdir = malloc(1024);
+        // unsigned *subdir_off;
+
+        // get_entry(path, subdir, subdir_off);
+
+        // log("readdir back");
+
+    
 
     return 0;
 }
@@ -220,8 +246,10 @@ static int sfs_read(const char *path,
     struct sfs_entry *entry = malloc(64);
     unsigned *entry_off;
 
-    if(get_entry(path, entry, entry_off))
+    if(get_entry(path, entry, entry_off) > 0){
         return -ENOSYS;
+    }
+        
     
         
     blockidx_t blockID = entry->first_block;
