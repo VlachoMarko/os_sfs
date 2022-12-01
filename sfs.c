@@ -63,8 +63,9 @@ const char* __asan_default_options() { return "detect_leaks=0"; }
  * Finally, the parent_blockidx contains the blockidx of the given directory on
  * the disk, which will help in calculating ret_entry_off.
  */
-static int get_entry(const char *path, struct sfs_entry *ret_entry,
-                     unsigned *ret_entry_off)
+static int get_entry_rec(const char *path, const struct sfs_entry *parent,
+                            size_t parent_nentries, blockidx_t parent_blockidx,
+                            struct sfs_entry *ret_entry)
 {
     /* Get the next component of the path. Make sure to not modify path if it is
      * the value passed by libfuse (i.e., make a copy). Note that strtok
@@ -77,43 +78,94 @@ static int get_entry(const char *path, struct sfs_entry *ret_entry,
      * path, return it. If there are more parts remaining, recurse to handle
      * that subdirectory. */
 
+    // log("path before: %s", (char *) path);
     
-    int ret = 1;    
-    char *thePath = (char *) path;
+    int res = 1;    
+    char pathCopy[59];
+    strcpy(pathCopy, path);
     const char slash[2] = "/";
-    void *token;
+    void *lastDir;
+    
+    lastDir = strtok(pathCopy, slash);
+    void *childDir = lastDir;
+    void *temp = lastDir;
 
-    token = strtok(thePath, slash);
-
-    struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
-    disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
-
-    for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
-        if(strlen(rootdir[i].filename) > 0 && strcmp(rootdir[i].filename, token) == 0){
-            log("found entry: %s", rootdir[i].filename);
-            
-            log("remaining path: %s or %s?\n", thePath, path);  
-            // if(rootdir[i].size & SFS_DIRECTORY){
-
-            //     blockidx_t blockID = rootdir[i].first_block;
-            //     disk_read(ret_entry, 512, SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE);
-
-            //     blockidx_t *buffer = malloc(2);
-            //     disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
-            //     blockID = *buffer;
-                
-            //     disk_read(ret_entry+512, 512, SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE);
-
-            // }
-            // else {
-                disk_read(ret_entry, sizeof(struct sfs_entry), SFS_ROOTDIR_OFF + i * sizeof(struct sfs_entry));
-            // }   
-
-            ret = 0;
-        }
+    while(temp != NULL){
+        lastDir = temp;
+        temp = strtok(NULL, slash);
     }
 
-    return ret;
+    log("last dir: %s", (char *) lastDir);
+
+    struct sfs_entry dir[parent_nentries];
+      
+    if(parent_nentries == SFS_ROOTDIR_NENTRIES){
+        disk_read(dir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
+        
+        for (unsigned int i=0; i < parent_nentries; i++){
+            if(strlen(dir[i].filename) > 0 && strcmp(dir[i].filename, lastDir) == 0){
+            
+                res = 0;
+
+                blockidx_t blockID = dir[i].first_block;
+                if(dir[i].size & SFS_DIRECTORY){
+                    log("found dir in root: %s", (char *) lastDir);
+
+                    disk_read(ret_entry, SFS_DIR_SIZE, SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE);
+                    return res;
+                }        
+                else {
+                    log("found file in root: %s", (char *) lastDir);
+                    disk_read(ret_entry, sizeof(struct sfs_entry), SFS_ROOTDIR_OFF + i * sizeof(struct sfs_entry));
+                    return res;
+                }   
+            }  
+        } 
+        for (unsigned int i=0; i < parent_nentries; i++){
+            if(strlen(dir[i].filename) > 0 && strcmp(dir[i].filename, childDir) == 0){
+                
+                log("goto childDir");
+                res = get_entry_rec(path, NULL, SFS_DIR_NENTRIES, dir[i].first_block, ret_entry);
+                return res;
+            }
+        }
+    }
+    else if (parent_nentries == SFS_DIR_NENTRIES) {
+        log("subdir not implemented");
+        disk_read(dir, SFS_DIR_SIZE, SFS_DATA_OFF + parent_blockidx * SFS_BLOCK_SIZE);
+        
+        for(unsigned int i=0; i<parent_nentries; i++){
+            
+            if(strlen(dir[i].filename) > 0 && strcmp(dir[i].filename, lastDir) == 0){
+
+                res = 0;
+
+                if(dir[i].size & SFS_DIRECTORY){
+                    log("found dir in subdir: %s", (char *) lastDir);
+
+                    disk_read(ret_entry, SFS_DIR_SIZE, SFS_DATA_OFF + parent_blockidx * SFS_BLOCK_SIZE);
+                    return res;
+                }        
+                else {
+                    log("found file in subdir: %s", (char *) lastDir);
+                    disk_read(ret_entry, sizeof(struct sfs_entry), SFS_DATA_OFF + parent_blockidx * SFS_BLOCK_SIZE + i);
+                    return res;
+                }   
+            }
+
+        }
+
+
+        return 0;
+    }
+    else {
+        log("not correct parentnentries");
+        return 1;
+    }
+
+    log("path after: %s", (char *) path);
+
+    return res;
 }
 
 
@@ -131,7 +183,7 @@ static int get_entry(const char *path, struct sfs_entry *ret_entry,
 static int sfs_getattr(const char *path,
                        struct stat *st)
 {
-    int res = -ENOSYS;
+    int res = -ENOENT;
 
     log("getattr %s\n", path);
 
@@ -143,31 +195,63 @@ static int sfs_getattr(const char *path,
     st->st_atime = time(NULL);
     st->st_mtime = time(NULL);
 
+    char pathCopy[59];
+    strcpy(pathCopy, path);
+    const char slash[2] = "/";
+    void *lastDir;
+
+    lastDir = strtok(pathCopy, slash);
+    lastDir = strtok(NULL, slash);
+
+
     if (strcmp(path, "/") == 0) {
         st->st_mode = S_IFDIR | 0755;
         st->st_nlink = 2;
         res = 0;
-    } else {
-        
-        struct sfs_entry *entry = malloc(64);
-        unsigned *entry_off;
+    }else if(lastDir != NULL){
 
-        if(get_entry(path, entry, entry_off) > 0 ){
+        log("not rootpath");
+        struct sfs_entry entry[16];
+
+        if(get_entry_rec(path, NULL, SFS_ROOTDIR_NENTRIES, 0, entry) > 0 ){
             return -ENOENT;
         }
 
-        res = 0;
-
-        if(entry->size & SFS_DIRECTORY){
+        if(entry[0].size & SFS_DIRECTORY){
             st->st_mode = S_IFDIR | 0755;
             st->st_nlink = 2;
         }
         else {
             st->st_mode = S_IFREG | 0755;
             st->st_nlink = 1;
-            st->st_size = entry->size & SFS_SIZEMASK;
+            st->st_size = entry[0].size & SFS_SIZEMASK;
         }   
-        
+
+        res = 0;
+    }
+    else {
+        log("rootpath");
+
+        struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
+        disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
+
+        for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
+
+            if(strcmp(rootdir[i].filename, &path[1]) == 0){
+                if(rootdir[i].size & SFS_DIRECTORY){
+                    st->st_mode = S_IFDIR | 0755;
+                    st->st_nlink = 2;
+                }
+                else {
+                    st->st_mode = S_IFREG | 0755;
+                    st->st_nlink = 1;
+                    st->st_size = rootdir[i].size & SFS_SIZEMASK;
+                }
+
+                res = 0;
+            }
+        }
+           
     }
 
     return res;
@@ -194,12 +278,11 @@ static int sfs_readdir(const char *path,
     (void)filler; /* Placeholder - use me */
     (void)buf; /* Placeholder - use me */
 
-    //if(strcmp(path, "/") == 0){
+    if(strcmp(path, "/") == 0){
+        log("rootpath");
 
         struct sfs_entry rootdir[SFS_ROOTDIR_NENTRIES];
         disk_read(rootdir, SFS_ROOTDIR_SIZE, SFS_ROOTDIR_OFF);
-
-        log("readdir rootpath");
 
         for (unsigned int i=0; i < SFS_ROOTDIR_NENTRIES; i++){
 
@@ -207,19 +290,26 @@ static int sfs_readdir(const char *path,
                 filler(buf, rootdir[i].filename, NULL, 0);
             }
         }
-    //}
-    //else {
-        //TODO: IMPLEMENT READDIR ON MULTIPLE LEVELS
-        // log("readdir not root path");
+   }
+   else {
+        log("not rootpath");
 
-        // struct sfs_entry *subdir = malloc(1024);
-        // unsigned *subdir_off;
+        struct sfs_entry entry[16];
 
-        // get_entry(path, subdir, subdir_off);
+        if (get_entry_rec(path, NULL, SFS_ROOTDIR_NENTRIES, 0, entry) > 0){
+            return -ENOENT;
+        }
 
-        // log("readdir back");
+        log("readdir back");
 
-    
+        for(unsigned int i=0; i < 16; i++){
+            
+            if(strlen(entry[i].filename) > 0){
+                filler(buf, entry[i].filename, NULL, 0);
+            } 
+        }
+
+    }
 
     return 0;
 }
@@ -243,20 +333,17 @@ static int sfs_read(const char *path,
 
     (void)buf; /* Placeholder - use me */
 
-    struct sfs_entry *entry = malloc(64);
-    unsigned *entry_off;
+    struct sfs_entry entry[16];
 
-    if(get_entry(path, entry, entry_off) > 0){
-        return -ENOSYS;
+    if(get_entry_rec(path, NULL, SFS_ROOTDIR_NENTRIES, 0, entry) > 0){
+        return -ENOENT;
     }
         
-    
-        
-    blockidx_t blockID = entry->first_block;
+    blockidx_t blockID = entry[0].first_block;
     size_t remainingBytes;
 
-    if(entry->size < size){
-        remainingBytes = entry->size;
+    if(entry[0].size < size){
+        remainingBytes = entry[0].size;
     }
     else {
         remainingBytes = size;
@@ -296,7 +383,7 @@ static int sfs_read(const char *path,
         blockID = *buffer;
 
         log("block id: %x", blockID);
-        log("remaining bytes: %d", remainingBytes);
+        // log("remaining bytes: %i", remainingBytes);
 
         currOffset = 0;
     }
@@ -401,56 +488,56 @@ static int sfs_write(const char *path,
     log("write %s data='%.*s' size=%zu offset=%ld\n", path, (int)size, buf,
         size, offset);
 
-    struct sfs_entry *entry = malloc(64);
-    unsigned *entry_off;
+    // struct sfs_entry entry[16];
+    // unsigned *entry_off;
 
-    if(get_entry(path, entry, entry_off))
-        return -ENOSYS;
+    // if(get_entry(path, entry, entry_off))
+    //     return -ENOSYS;
     
         
-    blockidx_t blockID = entry->first_block;
-    size_t remainingBytes = size;
+    // blockidx_t blockID = entry->first_block;
+    // size_t remainingBytes = size;
         
-    int bytesWritten = 0;
-    off_t currOffset = offset;
+    // int bytesWritten = 0;
+    // off_t currOffset = offset;
     
-    // assert((blockID != SFS_BLOCKIDX_EMPTY) && (blockID != SFS_BLOCKIDX_END));
+    // // assert((blockID != SFS_BLOCKIDX_EMPTY) && (blockID != SFS_BLOCKIDX_END));
 
-    while(currOffset >= 512){
-        blockidx_t *buffer = malloc(2);
-        disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
-        blockID = *buffer;
-        currOffset -= 512;
-    }
+    // while(currOffset >= 512){
+    //     blockidx_t *buffer = malloc(2);
+    //     disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
+    //     blockID = *buffer;
+    //     currOffset -= 512;
+    // }
 
-    while(remainingBytes > 0){
+    // while(remainingBytes > 0){
 
-        currOffset = SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE;
+    //     currOffset = SFS_DATA_OFF + blockID * SFS_BLOCK_SIZE;
 
-        if(remainingBytes < 512){
-            disk_write(buf+bytesWritten, remainingBytes, currOffset);
-            bytesWritten += remainingBytes;
-            remainingBytes = 0;
-            return bytesWritten;
-        }
-        else if(remainingBytes >= 512){    
-            disk_write(buf+bytesWritten, SFS_BLOCK_SIZE, currOffset);
-            bytesWritten += 512;
-            remainingBytes -= 512;
-        }
+    //     if(remainingBytes < 512){
+    //         disk_write(buf+bytesWritten, remainingBytes, currOffset);
+    //         bytesWritten += remainingBytes;
+    //         remainingBytes = 0;
+    //         return bytesWritten;
+    //     }
+    //     else if(remainingBytes >= 512){    
+    //         disk_write(buf+bytesWritten, SFS_BLOCK_SIZE, currOffset);
+    //         bytesWritten += 512;
+    //         remainingBytes -= 512;
+    //     }
         
 
-        blockidx_t *buffer = malloc(2);
-        disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
-        blockID = *buffer;
+    //     blockidx_t *buffer = malloc(2);
+    //     disk_read(buffer, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
+    //     blockID = *buffer;
 
-        log("block id: %x", blockID);
-        log("remaining bytes: %d", remainingBytes);
+    //     log("block id: %x", blockID);
+    //     log("remaining bytes: %d", remainingBytes);
 
-        currOffset = 0;
-    }
+    //     currOffset = 0;
+    // }
 
-    return bytesWritten;   
+    return -ENOSYS;   
 
 }
 
