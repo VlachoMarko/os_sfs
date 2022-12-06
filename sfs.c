@@ -156,6 +156,14 @@ static int get_entry_rec(const char *path, const struct sfs_entry *parent,
     else if (parent_nentries == SFS_DIR_NENTRIES) {
 
         disk_read(dir, SFS_DIR_SIZE, SFS_DATA_OFF + parent_blockidx * SFS_BLOCK_SIZE);
+
+        if(ret_entry_off == NULL){
+            log("isnull");
+        }
+        else {
+            log("isnotnull");
+            *ret_entry_off = SFS_DATA_OFF + parent_blockidx * SFS_BLOCK_SIZE;
+        }
         
         for(unsigned int i=0; i<parent_nentries; i++){
             
@@ -163,13 +171,7 @@ static int get_entry_rec(const char *path, const struct sfs_entry *parent,
 
                 res = 0;
 
-                if(ret_entry_off == NULL){
-                    log("isnull");
-                }
-                else {
-                    log("isnotnull");
-                    *ret_entry_off = SFS_DATA_OFF + i * sizeof(struct sfs_entry) + parent_blockidx * SFS_BLOCK_SIZE;
-                }
+                
 
                 disk_read(ret_entry, sizeof(struct sfs_entry), SFS_DATA_OFF + i * sizeof(struct sfs_entry) + parent_blockidx * SFS_BLOCK_SIZE);
                 return res;
@@ -665,6 +667,36 @@ static int sfs_rmdir(const char *path)
 
         }
         else {
+            
+            struct sfs_entry parentDir[SFS_DIR_NENTRIES];
+                    
+            disk_read(parentDir, SFS_DIR_SIZE, *entry_off);
+
+            blockidx_t blockID = 0;
+            unsigned int index = 0;
+            for(unsigned int i=0; i<SFS_DIR_NENTRIES; i++){
+                if(strcmp(parentDir[i].filename, entry->filename) == 0 && parentDir[i].first_block == entry->first_block){
+                    log("found at %i", i);
+                    index = i;
+                    blockID = parentDir[i].first_block;
+                    break;
+                }
+            }
+
+            blockidx_t temp = SFS_BLOCKIDX_EMPTY;
+            blockidx_t *input = &temp;
+
+            disk_write(input, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + blockID * 2);
+            disk_write(input, sizeof(blockidx_t), SFS_BLOCKTBL_OFF + (blockID+1) * 2);
+
+            
+            struct sfs_entry *new_entry = malloc(64);
+
+            strcpy(new_entry->filename, "\0");
+            new_entry->size = 0;
+            new_entry->first_block = SFS_BLOCKIDX_EMPTY;
+
+            disk_write(new_entry, sizeof(struct sfs_entry), ((*entry_off) + index * sizeof(struct sfs_entry)));
 
         }
 
